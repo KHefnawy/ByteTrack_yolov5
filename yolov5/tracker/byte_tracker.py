@@ -164,9 +164,11 @@ class BYTETracker(object):
         removed_stracks = []
 
         if output_results.shape[1] == 5:
+           # print("hiiiiiii")
             scores = output_results[:, 4]
             bboxes = output_results[:, :4]
         else:
+           # print("elseeee")
             output_results = output_results.cpu().numpy()
             scores = output_results[:, 4] * output_results[:, 5]
             bboxes = output_results[:, :4]  # x1y1x2y2
@@ -187,6 +189,7 @@ class BYTETracker(object):
 
         if len(dets) > 0:
             '''Detections'''
+            #print("strack")
             detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
                           (tlbr, s) in zip(dets, scores_keep)]
         else:

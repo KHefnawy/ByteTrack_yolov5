@@ -15,11 +15,12 @@ import os
 import time
 from models.common import DetectMultiBackend
 from utils.augmentations import letterbox
+from utils.augmentations import preproc
 from utils.general import non_max_suppression
 
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
-# device = "cpu"
+#device = "cpu"
 
 
 def make_parser():
@@ -56,7 +57,7 @@ def make_parser():
     parser.add_argument("--num_classes", type=int, default=1, help="number of classes")
     parser.add_argument("--conf", default=0.1, type=float, help="test conf")
     parser.add_argument("--nms", default=0.45, type=float, help="test nms threshold")
-    parser.add_argument("--tsize", default=(608, 1088), type=tuple, help="test image size")
+    parser.add_argument("--tsize", default=(1280,1280), type=tuple, help="test image size")
     parser.add_argument(
         "--fp16",
         dest="fp16",
@@ -72,12 +73,12 @@ def make_parser():
         help="Using TensorRT model for testing.",
     )
     # tracking args
-    parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
+    parser.add_argument("--track_thresh", type=float, default=0.3, help="tracking confidence threshold")
     parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
     parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
-    parser.add_argument('--min-box-area', type=float, default=10, help='filter out tiny boxes')
+    parser.add_argument('--min-box-area', type=float, default=5, help='filter out tiny boxes')
     parser.add_argument(
-        "--aspect_ratio_thresh", type=float, default=1.6,
+        "--aspect_ratio_thresh", type=float, default=5,
         help="threshold for filtering out boxes of which aspect ratio are above the given value."
     )
     return parser
@@ -111,9 +112,9 @@ class Predictor(object):
         self,
         model,
         # exp,
-        num_classes, conf_thresh, nms_thresh, test_size,
+        num_classes, conf_thresh, nms_thresh, test_size,device,
         trt_file=None,
-        device="cpu",
+        
         fp16=False
     ):
         self.model = model
@@ -128,8 +129,11 @@ class Predictor(object):
 
             model_trt = TRTModule()
             model_trt.load_state_dict(torch.load(trt_file))
-
-            x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
+            ##change here 
+            if device=="gpu":
+              x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
+            else:
+              x = torch.ones(1, 3, test_size[0], test_size[1])
             self.model(x)
 
     def inference(self, img, timer):
@@ -137,6 +141,7 @@ class Predictor(object):
         if isinstance(img, str):
             img_info["file_name"] = os.path.basename(img)
             img = cv2.imread(img)
+           
         else:
             img_info["file_name"] = None
 
@@ -145,16 +150,23 @@ class Predictor(object):
         img_info["width"] = width
         img_info["raw_img"] = img
 
+      
+        #img = letterbox(img, self.test_size)[0]
+        img = preproc(img, self.test_size,mean=None, std=None)[0]
+        #img = letterbox(img)[0]
+        #print("img_shape after letterbox =",img2.shape)
+       # print("img_shape after letterbox =",img.shape)
 
-        img = letterbox(img, self.test_size)[0]
-        # print('letterbox:', img.shape)
         # Convert
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
-        
-        img = torch.from_numpy(img).cuda()
+        #img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+       # img = np.ascontiguousarray(img)
+        ###change here to use cpu instead of gpud
+        if self.device=="gpu":
+          img = torch.from_numpy(img).cuda()
+        else:
+          img = torch.from_numpy(img)
         img = img.half() if self.fp16 else img.float()  # uint8 to fp16/32
-        img /= 255  # 0 - 255 to 0.0 - 1.0
+        #img /= 255  # 0 - 255 to 0.0 - 1.0
         # print(img)
         if len(img.shape) == 3:
             img = img[None]  # expand for batch dim
@@ -162,32 +174,22 @@ class Predictor(object):
         with torch.no_grad():
             timer.tic()
             # print('image shape:', img.size())
-            # print(img)
+            #print("infernec ",img)
             outputs = self.model(img, False, False)
-            # if self.decoder is not None:
-            #     outputs = self.decoder(outputs, dtype=outputs.type())
-            print('before nms:', outputs.size())
+            #print("outputs",outputs[0])
             outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
-            # outputs = non_max_suppression(outputs, 0.1, 0.45, classes=[0], max_det=1000)
-            # print(outputs[0].shape)
-            print('after nms:', outputs[0].size())
+           
             timer.toc()
-            # print(outputs[0].cpu().numpy())
-            # try: 
-            #     print('detect num:', len(outputs[0]))
-                
-            # except:
-            #     print('detect num:', 0)    
-            
-            #logger.info("Infer time: {:.4f}s".format(time.time() - t0))
+           
         return outputs, img_info
 
 def save_outputs(outputs, folder, save_name):
     sn = save_name.split('/')[-1].replace('.jpg', '.txt')
     # if not os.path.exists('yolov5_outputs'):
     #     os.mkdir('yolov5_outputs')
-
+    
     sn = os.path.join('runs', folder, sn)
+    print("sn ",sn)
     # if not os.path.exists(os.path.join('yolov5_outputs', folder)):
     #     os.mkdir(os.path.join('yolov5_outputs', folder))
     # open or creat new file if dont exist
@@ -214,6 +216,7 @@ def image_demo(predictor, vis_folder, path, current_time, save_result, save_name
     for image_name in files:
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
+        print("imagename :",image_name)    
         outputs, img_info = predictor.inference(image_name, timer)
         save_outputs(outputs, save_name, image_name)
         if outputs[0] is not None:
@@ -228,6 +231,7 @@ def image_demo(predictor, vis_folder, path, current_time, save_result, save_name
             for t in online_targets:
                 tlwh = t.tlwh
                 tid = t.track_id
+                
                 vertical = tlwh[2] / tlwh[3] > args.aspect_ratio_thresh
                 if tlwh[2] * tlwh[3] > args.min_box_area and not vertical:
                     online_tlwhs.append(tlwh)
@@ -236,13 +240,14 @@ def image_demo(predictor, vis_folder, path, current_time, save_result, save_name
             # save results
             results.append((frame_id + 1, online_tlwhs, online_ids, online_scores))
             timer.toc()
-            online_im = plot_tracking(img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id + 1,
+            online_im = plot_tracking(img_info['raw_img'], online_tlwhs, online_ids,online_ids ,frame_id=frame_id + 1,
                                           fps=1. / timer.average_time)
         else:
             timer.toc()
             online_im = img_info['raw_img']
 
         #result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
+        save_result=True
         if save_result:
             save_folder = os.path.join(
                 vis_folder, save_name
@@ -262,10 +267,13 @@ def image_demo(predictor, vis_folder, path, current_time, save_result, save_name
 
 
 def imageflow_demo(predictor, vis_folder, current_time, args):
+    import cv2
+    print(args.path)
     cap = cv2.VideoCapture(args.path if args.demo == "video" else args.camid)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
     fps = cap.get(cv2.CAP_PROP_FPS)
+    print("fps= ",fps)
     save_name = args.save_name
     save_folder = os.path.join(
         vis_folder, save_name
@@ -275,6 +283,7 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
         save_path = os.path.join(save_folder, args.path.split("/")[-1])
     else:
         save_path = os.path.join(save_folder, save_name + ".mp4")
+        print("video save path is ",save_path)
     logger.info(f"video save_path is {save_path}")
     vid_writer = cv2.VideoWriter(
         save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
@@ -287,9 +296,21 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
         ret_val, frame = cap.read()
-        # frame = cv2.resize(frame, (1280, 720))
+        
+        
+        #print("hereeeeeeeeeeeeeee",ret_val)
+        
         if ret_val:
+            ## CHANGE HERE !!!!!!!!  change frame size 
+            #frame = cv2.resize(frame, (608, 1088))
+           # print(frame)
+            #print("inferneceeeeee")
+            #frame = cv2.resize(frame, (1280, 720))
             outputs, img_info = predictor.inference(frame, timer)
+            #print("outputs",outputs)
+            #print("img_info",img_info)
+
+            #print("outputs",outputs)
 
             # for i, det in enumerate(outputs):
             if outputs[0] is not None:
@@ -307,14 +328,17 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
                         online_scores.append(t.score)
                 results.append((frame_id + 1, online_tlwhs, online_ids, online_scores))
                 timer.toc()
-                online_im = plot_tracking(img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id + 1,
+                online_im = plot_tracking(img_info['raw_img'], online_tlwhs, online_ids,online_ids,frame_id=frame_id + 1,
                                           fps=1. / timer.average_time)
             else:
                 timer.toc()
                 online_im = img_info['raw_img']
-            if args.save_result:
+            save_result=True
+            #if args.save_result:
+            if save_result:
                 vid_writer.write(online_im)
-            # cv2.imshow("online_im", online_im)
+                #print("hereeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+                #cv2.imshow("online_im", online_im)
             ch = cv2.waitKey(1)
             if ch == 27 or ch == ord("q") or ch == ord("Q"):
                 break
@@ -343,7 +367,12 @@ def main(args):
     num_classes = args.num_classes
 
     ckpt_file = args.ckpt
-    model = DetectMultiBackend(ckpt_file, device='cuda')
+
+    if args.device=="gpu":
+
+       model = DetectMultiBackend(ckpt_file, device='cuda')
+    else:
+        model = DetectMultiBackend(ckpt_file, device='cpu')
     if args.fp16:
         model.model.half()
     model.eval()
@@ -358,8 +387,8 @@ def main(args):
         logger.info("Using TensorRT to inference")
     else:
         trt_file = None
-
-    predictor = Predictor(model, num_classes, conf_thresh, nms_thresh, args.tsize, trt_file, args.device, args.fp16)
+    #print("siiiize",args.tsize)
+    predictor = Predictor(model, num_classes, conf_thresh, nms_thresh, args.tsize,  args.device ,trt_file, args.fp16)
     current_time = time.localtime()
     if args.demo == "image":
         image_demo(predictor, vis_folder, args.path, current_time, args.save_result, args.save_name, args.tsize)
@@ -370,5 +399,5 @@ def main(args):
 if __name__ == "__main__":
     args = make_parser().parse_args()
     assert args.demo in ["image", "video", "webcam"], "demo type not supported, only support [image, video, webcam]"
-    assert args.tsize in [(800, 1440), (608, 1088)], "tsize not supported, only (800, 1440) and (608, 1088)"
+    #assert args.tsize in [(800, 1440), (608, 1088)], "tsize not supported, only (800, 1440) and (608, 1088)"
     main(args)
